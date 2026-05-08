@@ -69,41 +69,34 @@ Zhiyu Wu*, Xiaokang Chen*, Zizheng Pan*, Xingchao Liu*, Wen Liu**, Damai Dai, Hu
 
 ## 2. Release
 
-### Model Zoo
-
-| Model | #Total Params | #Activated Params | HuggingFace |
-|-------|--------------|-------------------|-------------|
-| DeepSeek-VL2-Tiny | 3.37B | 1.0B | [🤗 Link](https://huggingface.co/deepseek-ai/deepseek-vl2-tiny) |
-| DeepSeek-VL2-Small | 16.1B | 2.8B | [🤗 Link](https://huggingface.co/deepseek-ai/deepseek-vl2-small) |
-| DeepSeek-VL2 | 27.5B | 4.5B | [🤗 Link](https://huggingface.co/deepseek-ai/deepseek-vl2) |
-
+- [2024.12.13] We have released DeepSeek-VL2 series including Tiny, Small and the full model. The codebase and the checkpoints are available now.
 
 ## 3. Model Download
 
-You can download the models from 🤗 HuggingFace:
+*To obtain models, we recommend visiting [Hugging Face](https://huggingface.co/deepseek-ai) for easier download, as certain models may be not yet available on other platforms.
 
-```shell
-# DeepSeek-VL2-Tiny (3.37B total, 1.0B activated)
-huggingface-cli download deepseek-ai/deepseek-vl2-tiny --local-dir deepseek-vl2-tiny
+We release the DeepSeek-VL2 series, including three variants:
 
-# DeepSeek-VL2-Small (16.1B total, 2.8B activated)
-huggingface-cli download deepseek-ai/deepseek-vl2-small --local-dir deepseek-vl2-small
+| Model | #Total Params | #Activated Params | Download |
+|-------|--------------|-------------------|----------|
+| DeepSeek-VL2-Tiny | 3.37B | 1.0B | [🤗 Hugging Face](https://huggingface.co/deepseek-ai/deepseek-vl2-tiny)   |
+| DeepSeek-VL2-Small | 16.1B | 2.8B | [🤗 Hugging Face](https://huggingface.co/deepseek-ai/deepseek-vl2-small)   |
+| DeepSeek-VL2 | 27.5B | 4.5B | [🤗 Hugging Face](https://huggingface.co/deepseek-ai/deepseek-vl2)   |
 
-# DeepSeek-VL2 (27.5B total, 4.5B activated)
-huggingface-cli download deepseek-ai/deepseek-vl2 --local-dir deepseek-vl2
-```
 
 ## 4. Quick Start
 
 ### Installation
 
+On the basis of `Python >= 3.8` environment, install the necessary dependencies by running the following command:
+
 ```shell
-git clone https://github.com/deepseek-ai/DeepSeek-VL2.git
-cd DeepSeek-VL2
 pip install -e .
 ```
 
-### Inference with Transformers
+### Simple Inference Example with One Image
+
+**Note: You may need 80GB GPU memory to run this script with deepseek-vl2-small and even larger for deepseek-vl2.**
 
 ```python
 import torch
@@ -112,75 +105,171 @@ from transformers import AutoModelForCausalLM
 from deepseek_vl2.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
 from deepseek_vl2.utils.io import load_pil_images
 
+
+# specify the path to the model
+model_path = "deepseek-ai/deepseek-vl2-tiny"
+vl_chat_processor: DeepseekVLV2Processor = DeepseekVLV2Processor.from_pretrained(model_path)
+tokenizer = vl_chat_processor.tokenizer
+
+vl_gpt: DeepseekVLV2ForCausalLM = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
+
+## single image conversation example
+## Please note that <|ref|> and <|/ref|> are designed specifically for the object localization feature. These special tokens are not required for normal conversations.
+## If you would like to experience the grounded captioning functionality (responses that include both object localization and reasoning), you need to add the special token <|grounding|> at the beginning of the prompt. Examples could be found in Figure 9 of our paper.
+conversation = [
+    {
+        "role": "<|User|>",
+        "content": "<image>\n<|ref|>The giraffe at the back.<|/ref|>.",
+        "images": ["./images/visual_grounding_1.jpeg"],
+    },
+    {"role": "<|Assistant|>", "content": ""},
+]
+
+# load images and prepare for inputs
+pil_images = load_pil_images(conversation)
+prepare_inputs = vl_chat_processor(
+    conversations=conversation,
+    images=pil_images,
+    force_batchify=True,
+    system_prompt=""
+).to(vl_gpt.device)
+
+# run image encoder to get the image embeddings
+inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
+
+# run the model to get the response
+outputs = vl_gpt.language.generate(
+    inputs_embeds=inputs_embeds,
+    attention_mask=prepare_inputs.attention_mask,
+    pad_token_id=tokenizer.eos_token_id,
+    bos_token_id=tokenizer.bos_token_id,
+    eos_token_id=tokenizer.eos_token_id,
+    max_new_tokens=512,
+    do_sample=False,
+    use_cache=True
+)
+
+answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=False)
+print(f"{prepare_inputs['sft_format'][0]}", answer)
+```
+
+And the output is something like:
+```
+<|User|>: <image>
+<|ref|>The giraffe at the back.<|/ref|>.
+
+<|Assistant|>: <|ref|>The giraffe at the back.<|/ref|><|det|>[[580, 270, 999, 900]]<|/det|><｜end▁of▁sentence｜>
+```
+
+### Simple Inference Example with Multiple Images
+
+**Note: You may need 80GB GPU memory to run this script with deepseek-vl2-small and even larger for deepseek-vl2.**
+
+```python
+import torch
+from transformers import AutoModelForCausalLM
+
+from deepseek_vl2.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
+from deepseek_vl2.utils.io import load_pil_images
+
+
+# specify the path to the model
+model_path = "deepseek-ai/deepseek-vl2-tiny"
+vl_chat_processor: DeepseekVLV2Processor = DeepseekVLV2Processor.from_pretrained(model_path)
+tokenizer = vl_chat_processor.tokenizer
+
+vl_gpt: DeepseekVLV2ForCausalLM = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
+
+# multiple images/interleaved image-text
+conversation = [
+    {
+        "role": "<|User|>",
+        "content": "This is image_1: <image>\n"
+                   "This is image_2: <image>\n"
+                   "This is image_3: <image>\n Can you tell me what are in the images?",
+        "images": [
+            "images/multi_image_1.jpeg",
+            "images/multi_image_2.jpeg",
+            "images/multi_image_3.jpeg",
+        ],
+    },
+    {"role": "<|Assistant|>", "content": ""}
+]
+
+# load images and prepare for inputs
+pil_images = load_pil_images(conversation)
+prepare_inputs = vl_chat_processor(
+    conversations=conversation,
+    images=pil_images,
+    force_batchify=True,
+    system_prompt=""
+).to(vl_gpt.device)
+
+# run image encoder to get the image embeddings
+inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
+
+# run the model to get the response
+outputs = vl_gpt.language.generate(
+    inputs_embeds=inputs_embeds,
+    attention_mask=prepare_inputs.attention_mask,
+    pad_token_id=tokenizer.eos_token_id,
+    bos_token_id=tokenizer.bos_token_id,
+    eos_token_id=tokenizer.eos_token_id,
+    max_new_tokens=512,
+    do_sample=False,
+    use_cache=True
+)
+
+answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=False)
+print(f"{prepare_inputs['sft_format'][0]}", answer)
+```
+
+And the output is something like:
+```
+<|User|>: This is image_1: <image>
+This is image_2: <image>
+This is image_3: <image>
+ Can you tell me what are in the images?
+
+<|Assistant|>: The images show three different types of vegetables. Image_1 features carrots, which are orange with green tops. Image_2 displays corn cobs, which are yellow with green husks. Image_3 contains raw pork ribs, which are pinkish-red with some marbling.<｜end▁of▁sentence｜>
+```
+
+### Simple Inference Example with Incremental Prefilling
+
+**Note: We use incremental prefilling to inference within 40GB GPU using deepseek-vl2-small.**
+
+```python
+import torch
+from transformers import AutoModelForCausalLM
+
+from deepseek_vl2.models import DeepseekVLV2Processor, DeepseekVLV2ForCausalLM
+from deepseek_vl2.utils.io import load_pil_images
+
+
 # specify the path to the model
 model_path = "deepseek-ai/deepseek-vl2-small"
 vl_chat_processor: DeepseekVLV2Processor = DeepseekVLV2Processor.from_pretrained(model_path)
 tokenizer = vl_chat_processor.tokenizer
 
-vl_gpt: DeepseekVLV2ForCausalLM = AutoModelForCausalLM.from_pretrained(
-    model_path,
-    trust_remote_code=True,
-    torch_dtype=torch.bfloat16
-).cuda().eval()
+vl_gpt: DeepseekVLV2ForCausalLM = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+vl_gpt = vl_gpt.to(torch.bfloat16).cuda().eval()
 
-# single image conversation
+# multiple images/interleaved image-text
 conversation = [
     {
-        "role": "User",
-        "content": "<image>\nDescribe the image.",
-        "images": ["./images/training_pipelines.png"],
-    },
-    {
-        "role": "Assistant",
-        "content": ""
-    }
-]
-
-# load images and prepare for inputs
-pil_images = load_pil_images(conversation)
-prepare_inputs = vl_chat_processor(
-    conversations=conversation,
-    images=pil_images,
-    force_batchify=True
-).to(vl_gpt.device)
-
-# run image encoder to get the image embeddings
-inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
-
-# run the model to get the response
-outputs = vl_gpt.language_model.generate(
-    inputs_embeds=inputs_embeds,
-    attention_mask=prepare_inputs.attention_mask,
-    pad_token_id=tokenizer.eos_token_id,
-    bos_token_id=tokenizer.bos_token_id,
-    eos_token_id=tokenizer.eos_token_id,
-    max_new_tokens=512,
-    do_sample=False,
-    use_cache=True
-)
-
-answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
-print(f"{prepare_inputs['sft_format'][0]}", answer)
-```
-
-### Multi-image Conversation
-
-```python
-# multi-image conversation
-conversation = [
-    {
-        "role": "User",
-        "content": "This is image_1: <image>\nThis is image_2: <image>\nThis is image_3: <image>\nCan you tell me what are in the images?",
+        "role": "<|User|>",
+        "content": "This is image_1: <image>\n"
+                   "This is image_2: <image>\n"
+                   "This is image_3: <image>\n Can you tell me what are in the images?",
         "images": [
-            "https://raw.githubusercontent.com/deepseek-ai/DeepSeek-VL2/main/images/image_1.jpg",
-            "https://raw.githubusercontent.com/deepseek-ai/DeepSeek-VL2/main/images/image_2.jpg",
-            "https://raw.githubusercontent.com/deepseek-ai/DeepSeek-VL2/main/images/image_3.jpg"
+            "images/multi_image_1.jpeg",
+            "images/multi_image_2.jpeg",
+            "images/multi_image_3.jpeg",
         ],
     },
-    {
-        "role": "Assistant",
-        "content": ""
-    }
+    {"role": "<|Assistant|>", "content": ""}
 ]
 
 # load images and prepare for inputs
@@ -188,67 +277,45 @@ pil_images = load_pil_images(conversation)
 prepare_inputs = vl_chat_processor(
     conversations=conversation,
     images=pil_images,
-    force_batchify=True
+    force_batchify=True,
+    system_prompt=""
 ).to(vl_gpt.device)
 
-# run image encoder to get the image embeddings
-inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
+with torch.no_grad():
+    # run image encoder to get the image embeddings
+    inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
 
-# run the model to get the response
-outputs = vl_gpt.language_model.generate(
-    inputs_embeds=inputs_embeds,
-    attention_mask=prepare_inputs.attention_mask,
-    pad_token_id=tokenizer.eos_token_id,
-    bos_token_id=tokenizer.bos_token_id,
-    eos_token_id=tokenizer.eos_token_id,
-    max_new_tokens=512,
-    do_sample=False,
-    use_cache=True
-)
+    # incremental_prefilling when using 40G GPU for vl2-small
+    inputs_embeds, past_key_values = vl_gpt.incremental_prefilling(
+        input_ids=prepare_inputs.input_ids,
+        images=prepare_inputs.images,
+        images_seq_mask=prepare_inputs.images_seq_mask,
+        images_spatial_crop=prepare_inputs.images_spatial_crop,
+        attention_mask=prepare_inputs.attention_mask,
+        chunk_size=512 # prefilling size
+    )
 
-answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
-print(f"{prepare_inputs['sft_format'][0]}", answer)
-```
+    # run the model to get the response
+    outputs = vl_gpt.generate(
+        inputs_embeds=inputs_embeds,
+        input_ids=prepare_inputs.input_ids,
+        images=prepare_inputs.images,
+        images_seq_mask=prepare_inputs.images_seq_mask,
+        images_spatial_crop=prepare_inputs.images_spatial_crop,
+        attention_mask=prepare_inputs.attention_mask,
+        past_key_values=past_key_values,
 
-### Grounding
+        pad_token_id=tokenizer.eos_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+        max_new_tokens=512,
 
-```python
-conversation = [
-    {
-        "role": "User",
-        "content": "<image>\n<|ref|>Describe the image.<|/ref|>",
-        "images": ["./images/training_pipelines.png"],
-    },
-    {
-        "role": "Assistant",
-        "content": ""
-    }
-]
+        do_sample=False,
+        use_cache=True,
+    )
 
-# load images and prepare for inputs
-pil_images = load_pil_images(conversation)
-prepare_inputs = vl_chat_processor(
-    conversations=conversation,
-    images=pil_images,
-    force_batchify=True
-).to(vl_gpt.device)
+    answer = tokenizer.decode(outputs[0][len(prepare_inputs.input_ids[0]):].cpu().tolist(), skip_special_tokens=False)
 
-# run image encoder to get the image embeddings
-inputs_embeds = vl_gpt.prepare_inputs_embeds(**prepare_inputs)
-
-# run the model to get the response
-outputs = vl_gpt.language_model.generate(
-    inputs_embeds=inputs_embeds,
-    attention_mask=prepare_inputs.attention_mask,
-    pad_token_id=tokenizer.eos_token_id,
-    bos_token_id=tokenizer.bos_token_id,
-    eos_token_id=tokenizer.eos_token_id,
-    max_new_tokens=512,
-    do_sample=False,
-    use_cache=True
-)
-
-answer = tokenizer.decode(outputs[0].cpu().tolist(), skip_special_tokens=True)
 print(f"{prepare_inputs['sft_format'][0]}", answer)
 ```
 
